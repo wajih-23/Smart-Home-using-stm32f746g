@@ -1,0 +1,205 @@
+import os
+import cv2
+import numpy as np
+from deepface import DeepFace
+import mediapipe as mp
+import speech_recognition as sr
+import serial
+import time
+import threading
+
+# Initialisation UART
+ser = serial.Serial('COM3', 115200, timeout=1)
+time.sleep(2)
+print("🟢 UART prêt. En attente de commandes...")
+
+# Initialisation des threads et des flags
+facial_thread = None
+vocal_thread = None
+stop_facial = False
+stop_vocal = False
+
+# Fonction : Reconnaissance faciale
+def facial_recognition():
+    global stop_facial
+    print("📷 Initialisation reconnaissance faciale...")
+
+    known_faces_files = [
+        r"C:\Users\WAJIH\Desktop\pfe\faces\face1.jpg",
+        r"C:\Users\WAJIH\Desktop\pfe\faces\face2.jpg"
+    ]
+
+    missing_files = [f for f in known_faces_files if not os.path.exists(f)]
+    if missing_files:
+        print("⚠️ Fichiers manquants :", missing_files)
+        return
+
+    known_faces = {os.path.basename(f): f for f in known_faces_files}
+
+    mp_face_detection = mp.solutions.face_detection
+    face_detection = mp_face_detection.FaceDetection(min_detection_confidence=0.3)
+
+    cap = cv2.VideoCapture(0)
+    print("🟢 Appuyez sur 'q' pour quitter la détection.")
+
+    while not stop_facial and cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame_resized = cv2.resize(frame, (640, 480))
+        rgb_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+        results = face_detection.process(rgb_frame)
+
+        if results.detections:
+            for detection in results.detections:
+                bboxC = detection.location_data.relative_bounding_box
+                h, w, _ = frame_resized.shape
+                x, y, w_box, h_box = int(bboxC.xmin * w), int(bboxC.ymin * h), int(bboxC.width * w), int(bboxC.height * h)
+                face_crop = frame_resized[y:y+h_box, x:x+w_box]
+
+                if face_crop.size == 0:
+                    continue
+
+                try:
+                    match = False
+                    for name, img_path in known_faces.items():
+                        result = DeepFace.verify(face_crop, img_path, model_name="Facenet", enforce_detection=False)
+                        if result["verified"]:
+                            text, color = f"✅ {name}", (0, 255, 0)
+                            match = True
+                            ser.write(b'SHOW\n')
+                            stop_facial = True
+                            break
+                    if not match:
+                        text, color = "❌ Inconnu", (0, 0, 255)
+
+                except Exception as e:
+                    text, color = "Erreur", (255, 0, 0)
+                    print(f"⚠️ Erreur DeepFace : {e}")
+
+                cv2.rectangle(frame_resized, (x, y), (x + w_box, y + h_box), color, 2)
+                cv2.putText(frame_resized, text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+        cv2.imshow("Reconnaissance Faciale", frame_resized)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+    print("🛑 Fin reconnaissance faciale")
+
+# Fonction : Commande vocale
+def voice_command():
+    global stop_vocal
+    recognizer = sr.Recognizer()
+    mic = sr.Microphone()
+
+    print("🎤 Commande vocale active. Parlez...")
+
+    while not stop_vocal:
+        with mic as source:
+            print("🕒 Écoute...")
+            recognizer.adjust_for_ambient_noise(source)
+            audio = recognizer.listen(source)
+
+        command = None
+        # 1. Tentative en anglais
+        try:
+            command = recognizer.recognize_google(audio, language="en-US").lower()
+            print(f"🔍 (EN) Commande détectée : {command}")
+        except sr.UnknownValueError:
+            pass
+        except sr.RequestError as e:
+            print(f"⚠️ Erreur service Google (EN) : {e}")
+
+        # 2. Tentative en français si échec en anglais
+        if not command:
+            try:
+                command = recognizer.recognize_google(audio, language="fr-FR").lower()
+                print(f"🔍 (FR) Commande détectée : {command}")
+            except sr.UnknownValueError:
+                print("❓ Je n'ai pas compris.")
+                continue
+            except sr.RequestError as e:
+                print(f"⚠️ Erreur service Google (FR) : {e}")
+                continue
+
+        if "light on" in command or "allume la lumière" in command:
+            ser.write(b'ON\n')
+            print("✅ Envoyé : ON")
+
+        elif "light off" in command or "éteins la lumière" in command:
+            ser.write(b'OFF\n')
+            print("✅ Envoyé : OFF")
+
+        elif "ac on" in command or "allume le climatiseur" in command:
+            ser.write(b'ACON\n')
+            print("✅ Envoyé : ACON")
+
+        elif "ac off" in command or "éteins le climatiseur" in command:
+            ser.write(b'ACOFF\n')
+            print("✅ Envoyé : ACOFF")
+
+        elif "open the door" in command or "ouvre la porte" in command:
+            ser.write(b'DOORON\n')
+            print("✅ Envoyé : DOORON")
+
+        elif "close the door" in command or "ferme la porte" in command:
+            ser.write(b'DOOROFF\n')
+            print("✅ Envoyé : DOOROFF")
+
+        elif "open the window" in command or "ouvre la fenêtre" in command or "ouvre la fenetre" in command:
+            ser.write(b'WINON\n')
+            print("✅ Envoyé : WINON")
+
+        elif "close the window" in command or "ferme la fenêtre" in command or "ferme la fenetre" in command:
+            ser.write(b'WINOFF\n')
+            print("✅ Envoyé : WINOFF")
+
+        elif "open all" in command or "ouvre tout" in command:
+            ser.write(b'OPENALL\n')
+            print("✅ Envoyé : OPENALL")
+
+        elif "close all" in command or "ferme tout" in command:
+            ser.write(b'CLOSEALL\n')
+            print("✅ Envoyé : CLOSEALL")
+
+        elif "switch to screen three" in command or "passe à l'écran trois" in command or "écran trois" in command:
+            ser.write(b'SWITCH_TO_SCREEN3\n')
+            print("✅ Envoyé : SWITCH_TO_SCREEN3")
+
+        else:
+            print("❌ Commande non reconnue.")
+
+    print("🛑 Fin commande vocale")
+
+# Boucle principale
+while True:
+    if ser.in_waiting:
+        cmd = ser.readline().decode().strip().upper()
+        print(f"📩 Commande reçue : {cmd}")
+
+        if cmd == "FACE":
+            if facial_thread is None or not facial_thread.is_alive():
+                stop_facial = False
+                facial_thread = threading.Thread(target=facial_recognition)
+                facial_thread.start()
+            else:
+                print("ℹ️ Reconnaissance faciale déjà en cours.")
+
+        elif cmd == "VOICE":
+            if facial_thread and facial_thread.is_alive():
+                stop_facial = True
+                facial_thread.join()
+                print("🛑 Arrêt de la reconnaissance faciale.")
+
+            if vocal_thread is None or not vocal_thread.is_alive():
+                stop_vocal = False
+                vocal_thread = threading.Thread(target=voice_command)
+                vocal_thread.start()
+            else:
+                print("ℹ️ Commande vocale déjà active.")
+
+        else:
+            print("⚠️ Commande inconnue.")
